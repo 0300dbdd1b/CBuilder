@@ -28,11 +28,42 @@
 	#define CB_PATH_SEP			"\\"
 	#define CB_NEWLINE			"\r\n"
 	#define CB_EXECV			_execv
+	#if	defined(CB_USE_COLORS)
+		#define CB_COLOR_GRAY		""
+		#define CB_COLOR_GREEN		""
+		#define CB_COLOR_YELLOW		""
+		#define CB_COLOR_ORANGE		""
+		#define CB_COLOR_CYAN		""
+		#define CB_COLOR_MAGENTA	""
+		#define CB_COLOR_RED		""
+		#define CB_COLOR_RESET		""
+	#endif
 #else
 	#define CB_EXEC_EXTENSION	""
 	#define CB_PATH_SEP			"/"
 	#define CB_NEWLINE			"\n"
 	#define CB_EXECV			execv
+	#if	defined(CB_USE_COLORS)
+		#define CB_COLOR_GRAY		"\033[90m"
+		#define CB_COLOR_GREEN		"\033[32m"
+		#define CB_COLOR_YELLOW		"\033[33m"
+		#define CB_COLOR_ORANGE		"\033[38;5;208m"
+		#define CB_COLOR_CYAN		"\033[36m"
+		#define CB_COLOR_MAGENTA	"\033[35m"
+		#define CB_COLOR_RED		"\033[31m"
+		#define CB_COLOR_RESET		"\033[0m"
+	#endif
+#endif
+
+#if !defined(CB_USE_COLORS)
+	#define CB_COLOR_GRAY		""
+	#define CB_COLOR_GREEN		""
+	#define CB_COLOR_YELLOW		""
+	#define CB_COLOR_ORANGE		""
+	#define CB_COLOR_CYAN		""
+	#define CB_COLOR_MAGENTA	""
+	#define CB_COLOR_RED		""
+	#define CB_COLOR_RESET		""
 #endif
 
 #define	CB_BUILDER_C_FILE		CB_BUILDER_NAME".c"
@@ -42,6 +73,8 @@
 #ifdef CB_STRIP_PREFIX
 	#define GetFileTime		CB_GetFileTime
 	#define AddRule			CB_AddRule
+	#define LOG				CB_LOG
+	#define SET_LOG_LEVEL	CB_SET_LOG_LEVEL
 #endif	// !CB_STRIP_PREFIX
 
 #include <unistd.h>
@@ -57,8 +90,65 @@
 #define CB_FREE		free
 #define CB_STRDUP	strdup
 #define CB_STRCMP	strcmp
+#define CB_PRINTF	printf
 
 
+#define LOG_LEVELS(X)								\
+	X(NONE,		"",			0,	"")					\
+	X(TRACE,	"TRACE",	1,	CB_COLOR_GRAY)		\
+	X(DEBUG,	"DEBUG",	2,	CB_COLOR_ORANGE)	\
+	X(INFO,		"INFO",		4,	CB_COLOR_CYAN)		\
+	X(WARN,		"WARN",		8,	CB_COLOR_YELLOW)	\
+	X(ERROR,	"ERROR",	16,	CB_COLOR_RED)		\
+	X(FATAL,	"FATAL",	32,	CB_COLOR_MAGENTA)
+
+enum CB_log_level
+{
+	#define X(sym, name, val, color)	LOG_##sym = val,
+		LOG_LEVELS(X)
+	#undef X
+};
+
+#define	CB_SET_LOG_LEVEL(lvl)	\
+	do							\
+	{							\
+		CB_g_log_level = lvl;	\
+	}	while (0)
+
+static const char * _CB_log_level_name(int lvl)
+{
+	switch (lvl)
+	{
+		#define X(sym, name, val, color)	case LOG_##sym : return name;
+			LOG_LEVELS(X)
+		#undef X
+		default: return "UNKNOWN";
+	}
+}
+
+static const char * _CB_log_level_color(int lvl)
+{
+	switch (lvl)
+	{
+		#define X(sym, name, val, color)	case LOG_##sym : return color;
+			LOG_LEVELS(X)
+		#undef X
+		default: return CB_COLOR_RESET;
+	}
+}	
+
+#define CB_LOG(lvl, fmt, ...)														\
+	do																				\
+	{																				\
+		if ((lvl) >= CB_g_log_level)												\
+		{																			\
+			CB_PRINTF("%s[%s]: " fmt "\n%s",										\
+				_CB_log_level_color(lvl),											\
+				_CB_log_level_name(lvl),											\
+				##__VA_ARGS__,														\
+				CB_COLOR_RESET);													\
+		}																			\
+	}	while (0)
 
 #define DA_DECL(T, name)	\
 	typedef struct			\
@@ -119,6 +209,7 @@ DA_DECL(CB_Rule, CB_Rules);
 #ifdef CBUILDER_IMPLEMENTATION
 
 CB_Rules	CB_gRules = {0};
+int			CB_g_log_level = LOG_DEBUG;
 
 time_t	CB_GetFileTime(char *path)
 {
@@ -153,8 +244,7 @@ static int	_CB_RebuildSelf(char **av)
 	{
 		return (0);
 	}
-	printf("FILE : %s\n", __FILE__);
-	printf("[CMD] : %s %s -o %s\n", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
+	CB_LOG(LOG_INFO, CB_COLOR_RESET "%s %s -o %s", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
 	int ret = system(CB_CC " " CB_BUILDER_C_FILE " -o " CB_BUILDER_EXEC_FILE);
 	return (ret == 0);
 }
@@ -195,17 +285,16 @@ int	CB_AddRule(char *name, int (*fn)(char ** av), char *desc)
 	int main(int ac, char **av)
 	{
 		_CB_SaveOldCBuilder();
-		_usr_main_(ac, av);
 		if (_CB_RebuildSelf(av))
 		{
 			fflush(NULL);
 			CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
 			return (0);
 		}
+		_usr_main_(ac, av);
 		_CB_ManageRules(ac, av);
 		return (0);
 	}
-
 	#define main _usr_main_
 
 #endif	// !CB_WRAP_MAIN_ONCE
