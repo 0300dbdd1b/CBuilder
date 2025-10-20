@@ -6,21 +6,21 @@
 
 int	testfn(char **av)
 {
-	system("echo yes");
+	for (int i = 0; av[i]; i++)
+		log(LOG_CMD, "%s", av[i]);
 	return 1;
 }
 
 int printhello(char **av)
 {
-	printf("HELLO \n");
+	log(LOG_INFO, "hello");
 	return 1;
 }
 
 int main(int ac, char **av)
 {
-	AddRule("hey", testfn, 0);
-	AddRule("hello", printhello, 0);
-	AddRule("hi", printhello, 0);
-	LOG(LOG_DEBUG, "Caca");
+	add_rule("hey", testfn, 0);
+	add_rule("hello", printhello, 0);
+	add_rule("hi", printhello, 0);
 }
 

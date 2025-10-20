@@ -44,18 +44,18 @@
 	#define CB_NEWLINE			"\n"
 	#define CB_EXECV			execv
 	#if	defined(CB_USE_COLORS)
-		#define CB_COLOR_GRAY		"\033[90m"
-		#define CB_COLOR_GREEN		"\033[32m"
-		#define CB_COLOR_YELLOW		"\033[33m"
-		#define CB_COLOR_ORANGE		"\033[38;5;208m"
-		#define CB_COLOR_CYAN		"\033[36m"
-		#define CB_COLOR_MAGENTA	"\033[35m"
-		#define CB_COLOR_RED		"\033[31m"
-		#define CB_COLOR_RESET		"\033[0m"
+		#define CB_COLOR_GRAY		"\x1b[90m"
+		#define CB_COLOR_GREEN		"\x1b[32m"
+		#define CB_COLOR_YELLOW		"\x1b[33m"
+		#define CB_COLOR_ORANGE		"\x1b[38;5;208m"
+		#define CB_COLOR_CYAN		"\x1b[36m"
+		#define CB_COLOR_MAGENTA	"\x1b[35m"
+		#define CB_COLOR_RED		"\x1b[31m"
+		#define CB_COLOR_RESET		"\x1b[0m"
 	#endif
 #endif
 
-#if !defined(CB_USE_COLORS)
+#if	!defined(CB_USE_COLORS)
 	#define CB_COLOR_GRAY		""
 	#define CB_COLOR_GREEN		""
 	#define CB_COLOR_YELLOW		""
@@ -71,10 +71,10 @@
 #define CB_BUILDER_EXEC_FILE	CB_BUILDER_NAME CB_EXEC_EXTENSION
 
 #ifdef CB_STRIP_PREFIX
-	#define GetFileTime		CB_GetFileTime
-	#define AddRule			CB_AddRule
-	#define LOG				CB_LOG
-	#define SET_LOG_LEVEL	CB_SET_LOG_LEVEL
+	#define log					cb_log
+	#define get_file_time		cb_get_file_time
+	#define mkdir_if_not_exists	cb_mkdir_if_not_exists
+	#define add_rule			cb_add_rule
 #endif	// !CB_STRIP_PREFIX
 
 #include <unistd.h>
@@ -84,6 +84,7 @@
 #include <stdarg.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #define CB_ALLOC	malloc
 #define CB_REALLOC	realloc
@@ -93,29 +94,50 @@
 #define CB_PRINTF	printf
 
 
-#define LOG_LEVELS(X)								\
-	X(NONE,		"",			0,	"")					\
-	X(TRACE,	"TRACE",	1,	CB_COLOR_GRAY)		\
-	X(DEBUG,	"DEBUG",	2,	CB_COLOR_ORANGE)	\
-	X(INFO,		"INFO",		4,	CB_COLOR_CYAN)		\
-	X(WARN,		"WARN",		8,	CB_COLOR_YELLOW)	\
-	X(ERROR,	"ERROR",	16,	CB_COLOR_RED)		\
-	X(FATAL,	"FATAL",	32,	CB_COLOR_MAGENTA)
+/*************	LOG	*************/
+extern unsigned int cb_g_log_level_mask;
 
-enum CB_log_level
+#define LOG_LEVELS(X)									\
+	X(NONE,		"NONE",		0,	CB_COLOR_RESET)			\
+	X(TRACE,	"TRACE",	1,	CB_COLOR_GRAY)			\
+	X(DEBUG,	"DEBUG",	2,	CB_COLOR_ORANGE)		\
+	X(INFO,		"INFO",		4,	CB_COLOR_CYAN)			\
+	X(WARN,		"WARN",		8,	CB_COLOR_YELLOW)		\
+	X(ERROR,	"ERROR",	16,	CB_COLOR_RED)			\
+	X(FATAL,	"FATAL",	32,	CB_COLOR_MAGENTA)		\
+	X(CMD,		"CMD",		64,	CB_COLOR_CYAN)
+
+enum cb_log_level
 {
 	#define X(sym, name, val, color)	LOG_##sym = val,
 		LOG_LEVELS(X)
 	#undef X
 };
 
-#define	CB_SET_LOG_LEVEL(lvl)	\
-	do							\
-	{							\
-		CB_g_log_level = lvl;	\
+#define CB_LOG_NONE		0u
+#define CB_LOG_ALL		(LOG_NONE | LOG_TRACE | LOG_DEBUG | LOG_INFO | LOG_WARN | LOG_ERROR | LOG_FATAL | LOG_CMD)
+
+#define cb_log_set(mask)			\
+	do								\
+	{								\
+		CB_g_log_level_mask = mask;	\
 	}	while (0)
 
-static const char * _CB_log_level_name(int lvl)
+#define cb_log_enable(lvl)			\
+	do								\
+	{								\
+		CB_g_log_level_mask |= lvl;	\
+	}	while (0)
+
+#define cb_log_disable(lvl)				\
+	do									\
+	{									\
+		CB_g_log_level_mask &= ~(lvl);	\
+	}	while (0)
+
+#define cb_log_enabled(lvl) (((lvl) == LOG_NONE) || (cb_g_log_level_mask & (lvl)) != 0u)
+
+static inline const char * cb_log_level_name(int lvl)
 {
 	switch (lvl)
 	{
@@ -126,30 +148,47 @@ static const char * _CB_log_level_name(int lvl)
 	}
 }
 
-static const char * _CB_log_level_color(int lvl)
+static inline const char * cb_log_level_color(int lvl)
 {
 	switch (lvl)
 	{
 		#define X(sym, name, val, color)	case LOG_##sym : return color;
 			LOG_LEVELS(X)
 		#undef X
-		default: return CB_COLOR_RESET;
+		default: return "";
 	}
-}	
+}
 
-#define CB_LOG(lvl, fmt, ...)														\
-	do																				\
-	{																				\
-		if ((lvl) >= CB_g_log_level)												\
-		{																			\
-			CB_PRINTF("%s[%s]: " fmt "\n%s",										\
-				_CB_log_level_color(lvl),											\
-				_CB_log_level_name(lvl),											\
-				##__VA_ARGS__,														\
-				CB_COLOR_RESET);													\
-		}																			\
+#define cb_log(lvl, fmt, ...)											\
+	do																	\
+	{																	\
+		if (cb_log_enabled(lvl))										\
+		{																\
+			if ((lvl) == LOG_NONE)										\
+			{															\
+				CB_PRINTF(fmt CB_COLOR_RESET "\n",						\
+					##__VA_ARGS__);										\
+			}															\
+			else if ((lvl) == LOG_CMD)									\
+			{															\
+				CB_PRINTF("%s[%s]: %s" fmt CB_COLOR_RESET "\n",			\
+			  			cb_log_level_color(lvl),						\
+						cb_log_level_name(lvl),							\
+						CB_COLOR_RESET,									\
+						##__VA_ARGS__);									\
+			}															\
+			else														\
+			{															\
+				CB_PRINTF("%s[%s]: " fmt CB_COLOR_RESET "\n",			\
+					cb_log_level_color(lvl),							\
+					cb_log_level_name(lvl),								\
+					##__VA_ARGS__);										\
+			}															\
+		}																\
 	}	while (0)
 
+
+/*************	DA	*************/
 #define DA_DECL(T, name)	\
 	typedef struct			\
 	{						\
@@ -193,14 +232,14 @@ static const char * _CB_log_level_color(int lvl)
 		(a).capacity = 0;	\
 	}	while (0)			\
 
-typedef struct CB_Rule
+typedef struct cb_rule
 {
 	char *	name;
 	char *	desc;
 	int		(*fn)(char ** av);
-}	CB_Rule;
+}	cb_rule;
 
-DA_DECL(CB_Rule, CB_Rules);
+DA_DECL(cb_rule, cb_rules);
 
 
 #endif	// !CBUILDER_H
@@ -208,10 +247,10 @@ DA_DECL(CB_Rule, CB_Rules);
 
 #ifdef CBUILDER_IMPLEMENTATION
 
-CB_Rules	CB_gRules = {0};
-int			CB_g_log_level = LOG_DEBUG;
+cb_rules		cb_g_rules = {0};
+unsigned int	cb_g_log_level_mask = CB_LOG_ALL;
 
-time_t	CB_GetFileTime(char *path)
+time_t	cb_get_file_time(char *path)
 {
 	#if		defined(CB_PLATFORM_WINDOWS)
 		struct _stat info;
@@ -232,71 +271,135 @@ time_t	CB_GetFileTime(char *path)
 	#endif
 }
 
-static int _CB_SaveOldCBuilder(void)
+static int _cb_save_old_builder(void)
 {
 	return 1;
 }
 
-static int	_CB_RebuildSelf(char **av)
+static int	_cb_rebuild_self(char **av)
 {
-	if (CB_GetFileTime(CB_BUILDER_C_FILE)	<= CB_GetFileTime(CB_BUILDER_EXEC_FILE) &&
-		CB_GetFileTime(CB_BUILDER_H_FILE)	<= CB_GetFileTime(CB_BUILDER_EXEC_FILE))
+	if (cb_get_file_time(CB_BUILDER_C_FILE)	<= cb_get_file_time(CB_BUILDER_EXEC_FILE) &&
+		cb_get_file_time(CB_BUILDER_H_FILE)	<= cb_get_file_time(CB_BUILDER_EXEC_FILE))
 	{
 		return (0);
 	}
-	CB_LOG(LOG_INFO, CB_COLOR_RESET "%s %s -o %s", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
+	cb_log(LOG_CMD, "%s %s -o %s", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
 	int ret = system(CB_CC " " CB_BUILDER_C_FILE " -o " CB_BUILDER_EXEC_FILE);
 	return (ret == 0);
 }
 
-
-static int	_CB_ManageRules(int ac, char **av)
+static int _cb_find_rule_index(const char *name)
 {
-	if (ac < 2) return 0;
-
-	for (int i = 0; i < CB_gRules.count; i++)
+	if (!name) return -1;
+	for (int k = 0; k < cb_g_rules.count; ++k)
 	{
-		if (CB_STRCMP(CB_gRules.data[i].name, av[1]) == 0)
-		{
-			CB_gRules.data[i].fn(av + 1);
-		}
+		const char *r = cb_g_rules.data[k].name;
+		if (r && CB_STRCMP(r, name) == 0)
+			return k;
 	}
-	return 0;
+	return -1;
 }
 
-int	CB_AddRule(char *name, int (*fn)(char ** av), char *desc)
+static int _cb_manage_rules(int ac, char **av)
 {
-	if (!CB_gRules.data && !CB_gRules.capacity && !CB_gRules.count)
+	if (ac < 2 || cb_g_rules.count == 0) return 0;
+
+	int status = 0;
+	int i = 1;
+
+	while (i < ac)
 	{
-		DA_INIT(CB_gRules, 10);
+		int ri = _cb_find_rule_index(av[i]);
+		if (ri < 0)
+		{
+			i++;
+			continue;
+		}
+		int start = i;
+		int j = i + 1;
+		while (j < ac && _cb_find_rule_index(av[j]) < 0)
+			j++;
+		char *saved = NULL;
+		if (j < ac)
+		{
+			saved = av[j];
+			av[j] = NULL;
+		}
+		char **rule_argv = &av[start + 1];
+		int rc = cb_g_rules.data[ri].fn(rule_argv);
+		if (rc != 0) status = rc;
+		if (j < ac) av[j] = saved;
+		i = j;
 	}
-	CB_Rule r;
+	return status;
+}
+
+int	_cb_help_rule(char **av)
+{
+	for (int i = 0; i < cb_g_rules.count; i++)
+	{
+		cb_rule r = cb_g_rules.data[i];
+		CB_PRINTF("%s\t:\t%s\n", r.name, r.desc);
+	}
+}
+
+int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
+{
+	if (!cb_g_rules.data && !cb_g_rules.capacity && !cb_g_rules.count)
+	{
+		DA_INIT(cb_g_rules, 10);
+	}
+	cb_rule r;
 	r.name = name ? CB_STRDUP(name) : 0;
 	r.desc = desc ? CB_STRDUP(desc) : 0;
 	r.fn = fn;
-	DA_APPEND(CB_gRules, r);
+	DA_APPEND(cb_g_rules, r);
 }
 
 #ifndef CB_WRAP_MAIN_ONCE
 #define CB_WRAP_MAIN_ONCE
 
-	int	_usr_main_(int, char **);
-	
-	int main(int ac, char **av)
-	{
-		_CB_SaveOldCBuilder();
-		if (_CB_RebuildSelf(av))
+	#if !defined(CB_SRC)
+		int	_usr_main_(int, char **);
+		
+		int main(int ac, char **av)
 		{
-			fflush(NULL);
-			CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
+			cb_add_rule("help", _cb_help_rule, "display this help message");
+			_cb_save_old_builder();
+			_usr_main_(ac, av);
+			if (_cb_rebuild_self(av))
+			{
+				fflush(NULL);
+				CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
+				return (0);
+			}
+			_cb_manage_rules(ac, av);
 			return (0);
 		}
-		_usr_main_(ac, av);
-		_CB_ManageRules(ac, av);
-		return (0);
-	}
-	#define main _usr_main_
 
+		#define main _usr_main_
+	#endif
 #endif	// !CB_WRAP_MAIN_ONCE
+
+int cb_mkdir_if_not_exists(const char *path)
+{
+	#ifdef CB_PLATFORM_WINDOWS
+		int result = _mkdir(path);
+	#else
+		int result = mkdir(path, 0755);
+	#endif
+	if (result < 0)
+	{
+		if (errno == EEXIST)
+		{
+			cb_log(LOG_INFO, "directory `%s` already exists", path);
+			return 1;
+		}
+		cb_log(LOG_ERROR, "could not create directory `%s`: %s", path, strerror(errno));
+		return 0;
+	}
+	cb_log(LOG_INFO, "created directory `%s`", path);
+	return 1;
+}
 
 #endif	// !CBUILDER_IMPLEMENTATION
