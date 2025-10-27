@@ -28,6 +28,7 @@
 	#define CB_PATH_SEP			"\\"
 	#define CB_NEWLINE			"\r\n"
 	#define CB_EXECV			_execv
+	#define CB_SPAWNP			_spawnvp
 	#if	defined(CB_USE_COLORS)
 		#define CB_COLOR_GRAY		""
 		#define CB_COLOR_GREEN		""
@@ -43,6 +44,7 @@
 	#define CB_PATH_SEP			"/"
 	#define CB_NEWLINE			"\n"
 	#define CB_EXECV			execv
+	#define CB_SPAWNP			posix_spawnp
 	#if	defined(CB_USE_COLORS)
 		#define CB_COLOR_GRAY		"\x1b[90m"
 		#define CB_COLOR_GREEN		"\x1b[32m"
@@ -70,21 +72,34 @@
 #define	CB_BUILDER_H_FILE		CB_BUILDER_NAME".h"
 #define CB_BUILDER_EXEC_FILE	CB_BUILDER_NAME CB_EXEC_EXTENSION
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdarg.h>
-#include <sys/time.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <spawn.h>
+#ifdef CB_PLATFORM_WINDOWS
+	#include <windows.h>
+	#include <unistd.h>
+	#include <stdio.h>
+	#include <stdlib.h>
+	#include <string.h>
+	#include <stdarg.h>
+	#include <sys/time.h>
+	#include <sys/stat.h>
+	#include <process.h>
+#else
+	#include <unistd.h>
+	#include <stdio.h>
+	#include <stdlib.h>
+	#include <string.h>
+	#include <stdarg.h>
+	#include <sys/time.h>
+	#include <sys/stat.h>
+	#include <errno.h>
+	#include <spawn.h>
+#endif
 
+int		cb_has_arg(char **av, const char *flag);
 time_t	cb_get_file_time(char *path);
 int		cb_mkdir_if_not_exists(const char *path);
 int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
 
-#define cb_build_cmd(first, ...)		_cb_build_cmd_impl(first, __VA_ARGS__, NULL);
+#define cb_build_cmd(first, ...)				_cb_build_cmd_impl(first, __VA_ARGS__, NULL)
 #define	cb_exec_cmd(cmd, ...)			_cb_exec_cmd_impl(cmd, (cb_cmd_opt){__VA_ARGS__})
 
 #ifdef CB_STRIP_PREFIX
@@ -93,6 +108,7 @@ int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
 	#define mkdir_if_not_exists	cb_mkdir_if_not_exists
 	#define add_rule			cb_add_rule
 	#define exec_cmd			cb_exec_cmd
+	#define has_arg				cb_has_arg
 #endif	// !CB_STRIP_PREFIX
 
 #define CB_ALLOC	malloc
@@ -316,7 +332,9 @@ static int _cb_exec_cmd_impl(cb_cmd *cmd, cb_cmd_opt opt)
 	}
 	int	pid;
 	int	rc;
-	rc = posix_spawnp(&pid, cmd->data[0], NULL, NULL, cmd->data, cb_g_envp);
+	#ifdef CB_PLATFORM_UNIX
+	rc = CB_SPAWNP(&pid, cmd->data[0], NULL, NULL, cmd->data, cb_g_envp);
+	#endif
 	cb_log(LOG_CMD, "%s", cb_cmd_to_cstr(cmd));
 	return (pid);
 }
@@ -328,12 +346,13 @@ static int _cb_save_old_builder(void)
 
 static int	_cb_rebuild_self(char **av)
 {
-	if (cb_get_file_time(CB_BUILDER_C_FILE)	<= cb_get_file_time(CB_BUILDER_EXEC_FILE) &&
-		cb_get_file_time(CB_BUILDER_H_FILE)	<= cb_get_file_time(CB_BUILDER_EXEC_FILE))
+	time_t	src_time	= cb_get_file_time(CB_BUILDER_C_FILE);
+	time_t	header_time	= cb_get_file_time(CB_BUILDER_H_FILE);
+	time_t	exec_time	= cb_get_file_time(CB_BUILDER_EXEC_FILE);
+	if (src_time <= exec_time && header_time <= exec_time)
 	{
 		return (0);
 	}
-	cb_log(LOG_CMD, "%s %s -o %s", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
 	cb_cmd cmd = cb_build_cmd(CB_CC, CB_BUILDER_C_FILE, "-o", CB_BUILDER_EXEC_FILE);
 	int ret = cb_exec_cmd(&cmd);
 	return (ret == 0);
@@ -392,6 +411,18 @@ int	_cb_help_rule(char **av)
 		cb_rule r = cb_g_rules.data[i];
 		CB_PRINTF("%s\t:\t%s\n", r.name, r.desc);
 	}
+}
+
+
+int cb_has_arg(char **av, const char *flag)
+{
+	if (!av || !flag) return 0;
+	for (int i = 0; av[i]; i++)
+	{
+		if (CB_STRCMP(av[i], flag) == 0)
+			return 1;
+	}
+	return 0;
 }
 
 time_t	cb_get_file_time(char *path)
@@ -460,14 +491,14 @@ int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
 		int main(int ac, char **av, char **envp)
 		{
 			cb_g_envp = envp;
-			cb_add_rule("self-rebuild", _cb_help_rule, "display this help message");
 			cb_add_rule("help", _cb_help_rule, "display this help message");
 			_cb_save_old_builder();
 			_usr_main_(ac, av);
 			if (_cb_rebuild_self(av))
 			{
 				fflush(NULL);
-				CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
+				cb_cmd cmd = cb_build_cmd("./"CB_BUILDER_EXEC_FILE, av);
+				cb_exec_cmd(&cmd);
 				return (0);
 			}
 			_cb_manage_rules(ac, av);
@@ -477,6 +508,5 @@ int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
 		#define main _usr_main_
 	#endif
 #endif	// !CB_WRAP_MAIN_ONCE
-
 
 #endif	// !CBUILDER_IMPLEMENTATION

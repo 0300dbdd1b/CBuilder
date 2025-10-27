@@ -21,9 +21,12 @@ int	testfn(char **av)
 
 int printhello(char **av)
 {
-	cb_cmd cmd = cb_build_cmd("echo", "hello", "world");
+	cb_cmd cmd;
+	if (has_arg(av, "world"))
+		cmd = cb_build_cmd("echo", "hello", "world");
+	else
+		cmd = cb_build_cmd("echo", "hello");
 	cb_exec_cmd(&cmd);
-	log(LOG_INFO, "hello");
 	return 1;
 }
 
