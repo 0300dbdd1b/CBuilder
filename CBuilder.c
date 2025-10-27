@@ -1,3 +1,8 @@
+#if 0
+	#!/bin/sh
+	gcc CBuilder.c -o CBuilder && ./CBuilder
+	exit
+#endif
 #define CBUILDER_IMPLEMENTATION
 #define CB_USE_COLORS
 #define CB_STRIP_PREFIX
@@ -6,13 +11,18 @@
 
 int	testfn(char **av)
 {
+	cb_cmd cmd;
+	DA_INIT(cmd, 10);
 	for (int i = 0; av[i]; i++)
-		log(LOG_CMD, "%s", av[i]);
+		DA_APPEND(cmd, av[i]);
+	exec_cmd(&cmd);
 	return 1;
 }
 
 int printhello(char **av)
 {
+	cb_cmd cmd = cb_build_cmd("echo", "hello", "world");
+	cb_exec_cmd(&cmd);
 	log(LOG_INFO, "hello");
 	return 1;
 }

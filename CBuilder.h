@@ -70,13 +70,6 @@
 #define	CB_BUILDER_H_FILE		CB_BUILDER_NAME".h"
 #define CB_BUILDER_EXEC_FILE	CB_BUILDER_NAME CB_EXEC_EXTENSION
 
-#ifdef CB_STRIP_PREFIX
-	#define log					cb_log
-	#define get_file_time		cb_get_file_time
-	#define mkdir_if_not_exists	cb_mkdir_if_not_exists
-	#define add_rule			cb_add_rule
-#endif	// !CB_STRIP_PREFIX
-
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +78,22 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <spawn.h>
+
+time_t	cb_get_file_time(char *path);
+int		cb_mkdir_if_not_exists(const char *path);
+int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
+
+#define cb_build_cmd(first, ...)		_cb_build_cmd_impl(first, __VA_ARGS__, NULL);
+#define	cb_exec_cmd(cmd, ...)			_cb_exec_cmd_impl(cmd, (cb_cmd_opt){__VA_ARGS__})
+
+#ifdef CB_STRIP_PREFIX
+	#define log					cb_log
+	#define get_file_time		cb_get_file_time
+	#define mkdir_if_not_exists	cb_mkdir_if_not_exists
+	#define add_rule			cb_add_rule
+	#define exec_cmd			cb_exec_cmd
+#endif	// !CB_STRIP_PREFIX
 
 #define CB_ALLOC	malloc
 #define CB_REALLOC	realloc
@@ -92,7 +101,10 @@
 #define CB_STRDUP	strdup
 #define CB_STRCMP	strcmp
 #define CB_PRINTF	printf
+#define CB_STRLEN	strlen
+#define CB_STRCAT	strcat
 
+extern char **cb_g_envp;
 
 /*************	LOG	*************/
 extern unsigned int cb_g_log_level_mask;
@@ -120,19 +132,19 @@ enum cb_log_level
 #define cb_log_set(mask)			\
 	do								\
 	{								\
-		CB_g_log_level_mask = mask;	\
+		cb_g_log_level_mask = mask;	\
 	}	while (0)
 
 #define cb_log_enable(lvl)			\
 	do								\
 	{								\
-		CB_g_log_level_mask |= lvl;	\
+		cb_g_log_level_mask |= lvl;	\
 	}	while (0)
 
 #define cb_log_disable(lvl)				\
 	do									\
 	{									\
-		CB_g_log_level_mask &= ~(lvl);	\
+		cb_g_log_level_mask &= ~(lvl);	\
 	}	while (0)
 
 #define cb_log_enabled(lvl) (((lvl) == LOG_NONE) || (cb_g_log_level_mask & (lvl)) != 0u)
@@ -241,6 +253,11 @@ typedef struct cb_rule
 
 DA_DECL(cb_rule, cb_rules);
 
+DA_DECL(char *, cb_cmd);
+typedef struct cb_cmd_opt
+{
+
+}	cb_cmd_opt;
 
 #endif	// !CBUILDER_H
 
@@ -249,26 +266,59 @@ DA_DECL(cb_rule, cb_rules);
 
 cb_rules		cb_g_rules = {0};
 unsigned int	cb_g_log_level_mask = CB_LOG_ALL;
+char **			cb_g_envp = NULL;
 
-time_t	cb_get_file_time(char *path)
+static cb_cmd _cb_build_cmd_impl(char *first, ...)
 {
-	#if		defined(CB_PLATFORM_WINDOWS)
-		struct _stat info;
-		if (_stat(path, &info) == 0)
-		{
-			return info.st_mtime;
-		}
-		return (time_t)(-1);
-	#elif	defined(CB_PLATFORM_UNIX)
-		struct stat info;
-		if (stat(path, &info) == 0)
-		{
-			return info.st_mtime;
-		}
-		return (time_t)(-1);
-	#else
-		return (time_t)(-1);
-	#endif
+	cb_cmd cmd;
+	va_list l;
+
+	DA_INIT(cmd, 5);
+	if (!first)
+		return cmd;
+	va_start(l, first);
+	char *arg = first;
+	while (arg)
+	{
+		DA_APPEND(cmd, CB_STRDUP(arg));
+		arg = va_arg(l, char *);
+	}
+	va_end(l);
+	DA_APPEND(cmd, NULL);
+	return (cmd);
+}
+
+static char * cb_cmd_to_cstr(cb_cmd *cmd)
+{
+	int		strs_len = 0;
+	if (!cmd || !cmd->count || !cmd->data || !cmd->data[0])
+		return (NULL);
+	for (int i = 0; i < cmd->count && cmd->data[i] ; i++)
+	{
+		strs_len += CB_STRLEN(cmd->data[i]);
+	}
+	char *out = CB_ALLOC(sizeof(char) * (strs_len + 1 + cmd->count));
+	for (int i = 0; i < cmd->count && cmd->data[i] ; i++)
+	{
+		CB_STRCAT(out, cmd->data[i]);
+		if (i != cmd->count - 1)
+			CB_STRCAT(out, " ");
+	}
+	return (out);
+}
+
+static int _cb_exec_cmd_impl(cb_cmd *cmd, cb_cmd_opt opt)
+{
+	if (!cmd || !cmd->count || !cmd->data || !cmd->data[0])
+	{
+		cb_log(LOG_ERROR, "execmd: empty command");
+		return (-1);
+	}
+	int	pid;
+	int	rc;
+	rc = posix_spawnp(&pid, cmd->data[0], NULL, NULL, cmd->data, cb_g_envp);
+	cb_log(LOG_CMD, "%s", cb_cmd_to_cstr(cmd));
+	return (pid);
 }
 
 static int _cb_save_old_builder(void)
@@ -284,18 +334,19 @@ static int	_cb_rebuild_self(char **av)
 		return (0);
 	}
 	cb_log(LOG_CMD, "%s %s -o %s", CB_CC, CB_BUILDER_C_FILE, CB_BUILDER_EXEC_FILE);
-	int ret = system(CB_CC " " CB_BUILDER_C_FILE " -o " CB_BUILDER_EXEC_FILE);
+	cb_cmd cmd = cb_build_cmd(CB_CC, CB_BUILDER_C_FILE, "-o", CB_BUILDER_EXEC_FILE);
+	int ret = cb_exec_cmd(&cmd);
 	return (ret == 0);
 }
 
 static int _cb_find_rule_index(const char *name)
 {
 	if (!name) return -1;
-	for (int k = 0; k < cb_g_rules.count; ++k)
+	for (int i = 0; i < cb_g_rules.count; i++)
 	{
-		const char *r = cb_g_rules.data[k].name;
+		const char *r = cb_g_rules.data[i].name;
 		if (r && CB_STRCMP(r, name) == 0)
-			return k;
+			return i;
 	}
 	return -1;
 }
@@ -343,43 +394,27 @@ int	_cb_help_rule(char **av)
 	}
 }
 
-int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
+time_t	cb_get_file_time(char *path)
 {
-	if (!cb_g_rules.data && !cb_g_rules.capacity && !cb_g_rules.count)
-	{
-		DA_INIT(cb_g_rules, 10);
-	}
-	cb_rule r;
-	r.name = name ? CB_STRDUP(name) : 0;
-	r.desc = desc ? CB_STRDUP(desc) : 0;
-	r.fn = fn;
-	DA_APPEND(cb_g_rules, r);
+	#if		defined(CB_PLATFORM_WINDOWS)
+		struct _stat info;
+		if (_stat(path, &info) == 0)
+		{
+			return info.st_mtime;
+		}
+		return (time_t)(-1);
+	#elif	defined(CB_PLATFORM_UNIX)
+		struct stat info;
+		if (stat(path, &info) == 0)
+		{
+			return info.st_mtime;
+		}
+		return (time_t)(-1);
+	#else
+		return (time_t)(-1);
+	#endif
 }
 
-#ifndef CB_WRAP_MAIN_ONCE
-#define CB_WRAP_MAIN_ONCE
-
-	#if !defined(CB_SRC)
-		int	_usr_main_(int, char **);
-		
-		int main(int ac, char **av)
-		{
-			cb_add_rule("help", _cb_help_rule, "display this help message");
-			_cb_save_old_builder();
-			_usr_main_(ac, av);
-			if (_cb_rebuild_self(av))
-			{
-				fflush(NULL);
-				CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
-				return (0);
-			}
-			_cb_manage_rules(ac, av);
-			return (0);
-		}
-
-		#define main _usr_main_
-	#endif
-#endif	// !CB_WRAP_MAIN_ONCE
 
 int cb_mkdir_if_not_exists(const char *path)
 {
@@ -401,5 +436,47 @@ int cb_mkdir_if_not_exists(const char *path)
 	cb_log(LOG_INFO, "created directory `%s`", path);
 	return 1;
 }
+
+
+int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
+{
+	if (!cb_g_rules.data && !cb_g_rules.capacity && !cb_g_rules.count)
+	{
+		DA_INIT(cb_g_rules, 10);
+	}
+	cb_rule r;
+	r.name = name ? CB_STRDUP(name) : 0;
+	r.desc = desc ? CB_STRDUP(desc) : 0;
+	r.fn = fn;
+	DA_APPEND(cb_g_rules, r);
+}
+
+#ifndef CB_WRAP_MAIN_ONCE
+#define CB_WRAP_MAIN_ONCE
+
+	#if !defined(CB_SRC)
+		int	_usr_main_(int, char **);
+		
+		int main(int ac, char **av, char **envp)
+		{
+			cb_g_envp = envp;
+			cb_add_rule("self-rebuild", _cb_help_rule, "display this help message");
+			cb_add_rule("help", _cb_help_rule, "display this help message");
+			_cb_save_old_builder();
+			_usr_main_(ac, av);
+			if (_cb_rebuild_self(av))
+			{
+				fflush(NULL);
+				CB_EXECV("./"CB_BUILDER_EXEC_FILE, av);
+				return (0);
+			}
+			_cb_manage_rules(ac, av);
+			return (0);
+		}
+
+		#define main _usr_main_
+	#endif
+#endif	// !CB_WRAP_MAIN_ONCE
+
 
 #endif	// !CBUILDER_IMPLEMENTATION
