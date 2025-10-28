@@ -90,8 +90,10 @@
 	#include <stdarg.h>
 	#include <sys/time.h>
 	#include <sys/stat.h>
+	#include <sys/wait.h>
 	#include <errno.h>
 	#include <spawn.h>
+	#include <fcntl.h>
 #endif
 
 int		cb_has_arg(char **av, const char *flag);
@@ -99,7 +101,8 @@ time_t	cb_get_file_time(char *path);
 int		cb_mkdir_if_not_exists(const char *path);
 int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
 
-#define cb_build_cmd(first, ...)				_cb_build_cmd_impl(first, __VA_ARGS__, NULL)
+#define cb_build_cmd(first, ...)		_cb_build_cmd_impl(first, __VA_ARGS__, NULL)
+#define cb_add_to_cmd(cmd, ...)			_cb_add_to_cmd(cmd, __VA_ARGS__, NULL)
 #define	cb_exec_cmd(cmd, ...)			_cb_exec_cmd_impl(cmd, (cb_cmd_opt){__VA_ARGS__})
 
 #ifdef CB_STRIP_PREFIX
@@ -108,6 +111,8 @@ int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
 	#define mkdir_if_not_exists	cb_mkdir_if_not_exists
 	#define add_rule			cb_add_rule
 	#define exec_cmd			cb_exec_cmd
+	#define build_cmd			cb_build_cmd
+	#define add_to_cmd			cb_add_to_cmd
 	#define has_arg				cb_has_arg
 #endif	// !CB_STRIP_PREFIX
 
@@ -117,6 +122,7 @@ int		cb_add_rule(char *name, int (*fn)(char ** av), char *desc);
 #define CB_STRDUP	strdup
 #define CB_STRCMP	strcmp
 #define CB_PRINTF	printf
+#define CB_MEMSET	memset
 #define CB_STRLEN	strlen
 #define CB_STRCAT	strcat
 
@@ -239,8 +245,7 @@ static inline const char * cb_log_level_color(int lvl)
 		if ((a).count >= (a).capacity)											\
 		{																		\
 			(a).capacity = (a).capacity ? (a).capacity * 2 : 1;					\
-			void *tmp = CB_REALLOC((a).data, sizeof(*(a).data) * (a).capacity);	\
-			(a).data = tmp;														\
+			(a).data = CB_REALLOC((a).data, sizeof(*(a).data) * (a).capacity);	\
 		}																		\
 		(a).data[(a).count++] = (value);										\
 } while (0)
@@ -272,6 +277,23 @@ DA_DECL(cb_rule, cb_rules);
 DA_DECL(char *, cb_cmd);
 typedef struct cb_cmd_opt
 {
+	int 	wait;
+
+	int		stdin_fd;
+	int		stdout_fd;
+	int		stderr_fd;
+
+	char*	stdin_path;
+	int		stdin_oflags;
+	int		stdin_mode;
+
+	char*	stdout_path;
+	int		stdout_oflags;
+	int		stdout_mode;
+
+	char*	stderr_path;
+	int		stderr_oflags;
+	int		stderr_mode;
 
 }	cb_cmd_opt;
 
@@ -296,7 +318,8 @@ static cb_cmd _cb_build_cmd_impl(char *first, ...)
 	char *arg = first;
 	while (arg)
 	{
-		DA_APPEND(cmd, CB_STRDUP(arg));
+		if (arg && strlen(arg))
+			DA_APPEND(cmd, CB_STRDUP(arg));
 		arg = va_arg(l, char *);
 	}
 	va_end(l);
@@ -304,16 +327,38 @@ static cb_cmd _cb_build_cmd_impl(char *first, ...)
 	return (cmd);
 }
 
+static int	_cb_add_to_cmd(cb_cmd *cmd, ...)
+{
+	va_list l;
+
+	if (!cmd)
+		return (0);
+	if (cmd->count > 0 && cmd->data[cmd->count - 1] == NULL)
+		cmd->count--;
+	va_start(l, cmd);
+	char *arg = va_arg(l, char *);
+	while (arg)
+	{
+		DA_APPEND((*cmd), CB_STRDUP(arg));
+		arg = va_arg(l, char *);
+	}
+	va_end(l);
+	DA_APPEND((*cmd), NULL);
+	return (1);
+}
+
 static char * cb_cmd_to_cstr(cb_cmd *cmd)
 {
 	int		strs_len = 0;
 	if (!cmd || !cmd->count || !cmd->data || !cmd->data[0])
 		return (NULL);
-	for (int i = 0; i < cmd->count && cmd->data[i] ; i++)
+	for (int i = 0; i < cmd->count; i++)
 	{
-		strs_len += CB_STRLEN(cmd->data[i]);
+		if (cmd->data[i])
+			strs_len += CB_STRLEN(cmd->data[i]);
 	}
-	char *out = CB_ALLOC(sizeof(char) * (strs_len + 1 + cmd->count));
+	char *out = CB_ALLOC(sizeof(char) * (strs_len + cmd->count + 1));
+	CB_MEMSET(out, 0, (strs_len + 1 + cmd->count));
 	for (int i = 0; i < cmd->count && cmd->data[i] ; i++)
 	{
 		CB_STRCAT(out, cmd->data[i]);
@@ -330,12 +375,51 @@ static int _cb_exec_cmd_impl(cb_cmd *cmd, cb_cmd_opt opt)
 		cb_log(LOG_ERROR, "execmd: empty command");
 		return (-1);
 	}
-	int	pid;
-	int	rc;
-	#ifdef CB_PLATFORM_UNIX
-	rc = CB_SPAWNP(&pid, cmd->data[0], NULL, NULL, cmd->data, cb_g_envp);
-	#endif
 	cb_log(LOG_CMD, "%s", cb_cmd_to_cstr(cmd));
+	#ifdef CB_PLATFORM_UNIX
+		pid_t	pid		= -1;
+		int		status	= 0;
+		int		rc;
+
+		posix_spawn_file_actions_t fa;
+		posix_spawn_file_actions_init(&fa);
+
+		if (!opt.stdin_oflags)
+			opt.stdin_oflags = (O_CREAT | O_TRUNC | O_WRONLY);
+		if (!opt.stdin_mode)
+			opt.stdin_mode = 0644;
+
+		if (!opt.stdout_oflags)
+			opt.stdout_oflags = (O_CREAT | O_TRUNC | O_WRONLY);
+		if (!opt.stdout_mode)
+			opt.stdout_mode = 0644;
+
+		if (!opt.stderr_oflags)
+			opt.stderr_oflags = (O_CREAT | O_TRUNC | O_WRONLY);
+		if (!opt.stderr_mode)
+			opt.stdin_mode = 0644;
+	
+		if (opt.stdin_fd > 0)
+			posix_spawn_file_actions_adddup2(&fa, opt.stdin_fd, STDIN_FILENO);
+		else if (opt.stdin_path)
+			posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, opt.stdin_path, opt.stdin_oflags, opt.stdin_mode);
+
+		if (opt.stdout_fd > 0)
+			posix_spawn_file_actions_adddup2(&fa, opt.stdout_fd, STDOUT_FILENO);
+		else if (opt.stdout_path)
+			posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, opt.stdout_path, opt.stdout_oflags, opt.stdout_mode);
+
+		if (opt.stderr_fd > 0)
+			posix_spawn_file_actions_adddup2(&fa, opt.stderr_fd, STDERR_FILENO);
+		else if (opt.stderr_path)
+			posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, opt.stderr_path, opt.stderr_oflags, opt.stderr_mode);
+
+		rc = posix_spawnp(&pid, cmd->data[0], &fa, NULL, cmd->data, cb_g_envp);
+		posix_spawn_file_actions_destroy(&fa);
+		if (!opt.wait)
+			return (1);
+		waitpid(pid, &status, 0);
+	#endif
 	return (pid);
 }
 
@@ -354,8 +438,8 @@ static int	_cb_rebuild_self(char **av)
 		return (0);
 	}
 	cb_cmd cmd = cb_build_cmd(CB_CC, CB_BUILDER_C_FILE, "-o", CB_BUILDER_EXEC_FILE);
-	int ret = cb_exec_cmd(&cmd);
-	return (ret == 0);
+	int ret = cb_exec_cmd(&cmd, .wait = 1);
+	return (ret);
 }
 
 static int _cb_find_rule_index(const char *name)
@@ -409,8 +493,20 @@ int	_cb_help_rule(char **av)
 	for (int i = 0; i < cb_g_rules.count; i++)
 	{
 		cb_rule r = cb_g_rules.data[i];
-		CB_PRINTF("%s\t:\t%s\n", r.name, r.desc);
+		CB_PRINTF("%s\t:\t%s\n", r.name, r.desc ? r.desc : "");
 	}
+}
+
+int _cb_self_rebuild_rule(char **av)
+{
+	cb_cmd cmd = cb_build_cmd(CB_CC, CB_BUILDER_C_FILE);
+	if (has_arg(av, "--gdb") || has_arg(av, "-gdb") || has_arg(av, "-g"))
+		cb_add_to_cmd(&cmd, "-ggdb");
+	if (has_arg(av, "--asan") || has_arg(av, "-a"))
+		cb_add_to_cmd(&cmd, "-fsanitize=undefined,address");
+	cb_add_to_cmd(&cmd, "-o", CB_BUILDER_EXEC_FILE);
+	int ret = cb_exec_cmd(&cmd, .wait = 1);
+	return (ret == 0);
 }
 
 
@@ -487,18 +583,24 @@ int	cb_add_rule(char *name, int (*fn)(char ** av), char *desc)
 
 	#if !defined(CB_SRC)
 		int	_usr_main_(int, char **);
-		
+
 		int main(int ac, char **av, char **envp)
 		{
+			cb_cmd cmd;
+			DA_INIT(cmd, ac + 8);
+			for (int i = 0; i < ac && av[i]; i++)
+			{
+				DA_APPEND(cmd, CB_STRDUP(av[i]));
+			}
+			DA_APPEND(cmd, NULL);
 			cb_g_envp = envp;
-			cb_add_rule("help", _cb_help_rule, "display this help message");
+			cb_add_rule("help",			_cb_help_rule,			"display this help message");
+			cb_add_rule("self-rebuild",	_cb_self_rebuild_rule,	"rebuild CBuilder");
 			_cb_save_old_builder();
 			_usr_main_(ac, av);
 			if (_cb_rebuild_self(av))
 			{
-				fflush(NULL);
-				cb_cmd cmd = cb_build_cmd("./"CB_BUILDER_EXEC_FILE, av);
-				cb_exec_cmd(&cmd);
+				cb_exec_cmd(&cmd, .wait = 1);
 				return (0);
 			}
 			_cb_manage_rules(ac, av);
